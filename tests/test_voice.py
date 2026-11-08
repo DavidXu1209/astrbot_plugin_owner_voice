@@ -33,10 +33,14 @@ class VoiceChecks(IsolatedAsyncioTestCase):
 
     async def test_scope_and_explicit_trigger(self):
         for value in ('你好', '你会用语音回复吗', '文档里写着“语音：你好”', '别用语音回复', '不要发语音了',
-                      '我刚才听了语音', '语音识别好难', '我发语音给你了', '不用语音，打字就行', '你会不会发语音？'):
+                      '我刚才听了语音', '语音识别好难', '我发语音给你了', '不用语音，打字就行', '你会不会发语音？',
+                      '求你了', '我喜欢听语音', '听到语音了', '我刚才听了语音版', '不想听语音', '不要听语音',
+                      '我不想听你的声音', '主要是语音功能', '语音识别，语音合成都难'):
             self.assertFalse(module.requested(value), value)
         for value in ('语音：你好', '请用语音回答我', '用语音回复我一句你好', '/语音 你好', '用语音说', '发个语音给我',
-                      '你用语音给我加加油', '语音回我', '说给我听', '我想听你的声音', '给我发条语音', '能用语音说一下吗'):
+                      '你用语音给我加加油', '语音回我', '说给我听', '我想听你的声音', '给我发条语音', '能用语音说一下吗',
+                      '语音语音', '我要听语音', '我要听语音版的', '用语音给我发消息', '给我语音', '再发一遍语音',
+                      '再听一遍语音', '语音呢', '想听语音', '听一下语音', '语音，语音', '发一下语音'):
             self.assertTrue(module.requested(value), value)
         self.assertTrue(self.plugin.allowed(self.event))
         self.event.unified_msg_origin = 'acceptance:GroupMessage:00000001'
@@ -65,6 +69,21 @@ class VoiceChecks(IsolatedAsyncioTestCase):
         self.assertEqual(self.result.chain[0].text, '这是合成测试。')
         self.plugin.synthesize.assert_awaited_once()
 
+    async def test_record_omits_false_voice_claim(self):
+        self.extra[module.MARKER] = True
+        self.result.chain = [Plain('刚才那条不就是语音嘛。路上慢点，晚安。')]
+        audio = self.plugin.root / 'spoken.wav'
+        seen = []
+
+        async def synth(text, tone=''):
+            seen.append(text)
+            return audio
+
+        self.plugin.synthesize = synth
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(seen, ['路上慢点，晚安。'])
+        self.assertEqual(self.result.chain[0].text, '路上慢点，晚安。')
+
     async def test_success_produces_native_record(self):
         self.extra[module.MARKER] = True
         audio = self.plugin.root / ('a'*32+'.mp3')
@@ -81,6 +100,77 @@ class VoiceChecks(IsolatedAsyncioTestCase):
         self.plugin.synthesize = AsyncMock()
         await self.plugin.speak_when_requested(self.event)
         self.plugin.synthesize.assert_not_awaited()
+
+    async def test_plain_plea_is_marked_and_forbids_false_claim(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text('{"last_delivery": "text"}', encoding='utf-8')
+        self.event.get_message_str = lambda: '我要听语音'
+        req = SimpleNamespace(system_prompt='原有人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertNotIn(module.SPONTANEOUS, self.extra)
+        self.assertIn('标准普通话', req.system_prompt)
+        self.assertIn('刚才那条', req.system_prompt)
+        self.assertIn('上一条发出去的是文字', req.system_prompt)
+        self.assertIn('原有人设', req.system_prompt)
+
+    async def test_repeated_voice_word_requests_speech(self):
+        self.event.get_message_str = lambda: '语音语音'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertIn(module.HINT_UNKNOWN.strip(), req.system_prompt)
+
+    async def test_delivery_is_recorded_for_the_next_turn(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(self.plugin._load_state()['last_delivery'], 'text')
+        self.extra[module.MARKER] = True
+        self.plugin.synthesize = AsyncMock(side_effect=TimeoutError())
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(self.plugin._load_state()['last_delivery'], 'text')
+        self.assertIsInstance(self.result.chain[0], Plain)
+        audio = self.plugin.root / 'spoken.wav'
+        self.plugin.synthesize = AsyncMock(return_value=audio)
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(self.plugin._load_state()['last_delivery'], 'voice')
+        self.assertIsInstance(self.result.chain[0], Record)
+
+    async def test_short_plea_after_a_recent_ask_is_voice(self):
+        import time
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text(
+            '{"last_ask": %s, "last_delivery": "text"}' % time.time(), encoding='utf-8')
+        self.event.get_message_str = lambda: '求你了'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertIn('上一条发出去的是文字', req.system_prompt)
+        self.extra.clear()
+        self.plugin.state_path.write_text(
+            '{"last_ask": %s, "last_delivery": "text"}' % (time.time() - 1000), encoding='utf-8')
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+        self.assertIn('上一条发出去的是文字', req.system_prompt)
+
+    async def test_unrelated_voice_mention_keeps_prompt(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text('{"last_delivery": "voice"}', encoding='utf-8')
+        self.event.get_message_str = lambda: '语音识别好难'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+        self.assertEqual(req.system_prompt, '人设')
+
+    async def test_recent_voice_is_not_denied(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text('{"last_delivery": "voice"}', encoding='utf-8')
+        self.event.get_message_str = lambda: '我要听语音版的'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertIn('确实是语音', req.system_prompt)
+        self.assertIn('不要怪他没点开', req.system_prompt)
 
 
 class SpontaneousChecks(IsolatedAsyncioTestCase):
@@ -243,6 +333,15 @@ class BreezeChecks(IsolatedAsyncioTestCase):
 
 
 class SpeechTextChecks(IsolatedAsyncioTestCase):
+    def test_false_claim_sentences_are_not_spoken(self):
+        first = '好啦好啦，语音版再听一遍。路上慢点走，别玩手机。明天等你哦。'
+        self.assertEqual(module.drop_false_claims(first), '路上慢点走，别玩手机。明天等你哦。')
+        second = '你这孩子，刚才那条不就是语音嘛，非得再来说一遍。行行行，路上慢点。晚安啦。'
+        self.assertEqual(module.drop_false_claims(second), '行行行，路上慢点。晚安啦。')
+        third = '爹，我都连发三条语音了，你到底在哪儿听的呀？是不是根本没点开这条？你好好听，路上慢点。晚安啦。'
+        self.assertEqual(module.drop_false_claims(third), '你好好听，路上慢点。晚安啦。')
+        self.assertEqual(module.drop_false_claims('路上慢点走，到了跟我说一声。晚安。'), '路上慢点走，到了跟我说一声。晚安。')
+
     def test_cleanup_and_chunks(self):
         t = '我是小助手，人可不憨啊。\n\n平时就爱跟你拌嘴（斜眼）\n明天见。（笑）[[meme:开心]]'
         s = module.speech_text(t)

@@ -4,7 +4,7 @@ desc: |
   只有指定的主人本人在私聊里明确要求时，才把这次回复念成中文女声语音发出来；
   配置了 BreezeBlue 音色就用它，没配则用免 Key 的微软 edge-tts 声音。
   深夜主人道晚安时，会按概率主动回一条晚安语音（每 7 天有上限）。
-version: 0.2.8
+version: 0.2.9
 author: David Xu
 repo: https://github.com/DavidXu1209/astrbot_plugin_owner_voice
 astrbot_version: ">=4.16.0"

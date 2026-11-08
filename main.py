@@ -33,18 +33,41 @@ CST = timezone(timedelta(hours=8))
 BREEZE_URL = 'https://api.breeze.blue/v1/text-to-speech/{voice}'
 VOICE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{4,64}$')
 REQUEST = re.compile(r'^\s*(?:[/／]语音(?:\s|[：:])|(?:请)?(?:用|发条|发一条)?语音(?:回复|回答|说|聊|[：:]))')
-# Natural asks anywhere in the message: 用语音说 / 发个语音 / 语音回我 / 说给我听 / 想听你的声音 ...
+# Natural asks anywhere in the message: 用语音说 / 语音语音 / 我要听语音 / 语音版 / 说给我听 ...
 VOICE_ASK = re.compile(
-    r'(?:用|发|来|回|录)(?:个|条|一条|一段|段|句|一句)?语音'
+    r'(?:用|发|来|回|录)(?:个|条|一条|一段|段|句|一句|遍|一遍|一下)?语音'
     r'|语音(?:回复|回答|回我|说|讲|念|喊|聊|发我|给我)'
+    r'|(?:^|[\s，,])(?:我?要|想要?|请|给)?听?语音版'
     r'|(?:说|念|读|讲|喊|唱)给我听'
     r'|想听(?:听)?你(?:的)?(?:声音|说话|讲话|说)'
-    r'|听听你的声音')
+    r'|听听你的声音'
+    r'|语音[\s，,、！!。.~～]{0,3}语音'
+    r'|(?<![不别甭])(?:想|要|想要|让我|给我|请|再)听(?![了过到见完着])(?:一?下|个|条|一遍|你的?)?语音'
+    r'|(?:^|[\s，,。！!你请])听(?:一?下|个|条|一遍)?语音'
+    r'|(?:给|请给)我(?:一?[个条句])?语音'
+    r'|(?:^|\s)语音(?:呢|啊|呀|吧|嘛|呗|[!！])')
 VOICE_NO = re.compile(
-    r'(?:别|不要|不用|不想|甭|无需|不必)(?:再)?(?:给我)?(?:用|发|回|来)?(?:个|条)?语音'
+    r'(?:别|不要|不用|不想|甭|无需|不必)(?:再)?(?:给我)?(?:用|发|回|来|听)?(?:个|条|一下|一遍)?语音'
     r'|(?<![给帮跟对和向])我(?:刚|刚才|已经|又)?(?:发|用|录)了?(?:个|条|一条)?语音'
     r'|会(?:不会)?(?:用|发)?语音.*[吗么?？]'
-    r'|[“"「『].{0,20}语音.{0,20}[”"」』]')
+    r'|[“"「『].{0,20}语音.{0,20}[”"」』]'
+    r'|[不别甭]想听')
+# 刚明确要过语音的几分钟里，再补一句很短的恳求，也当成还在要语音
+PLEA = re.compile(
+    r'^(?:你|请)?(?:求你了?|拜托了?|再来一?次|再发一?次|还是没有啊?|没有啊?|没听到|听不到|再说一?遍|再讲一?遍|再念一?遍)[!！。…~～啊呀]*$')
+PLEA_SECONDS = 180
+HINT_TEXT = '\n系统事实，不要复述：你上一条发出去的是文字，不是语音。不要说「刚才那条就是语音」「我已经发过了」「连发了几条」。'
+HINT_VOICE = '\n系统事实，不要复述：你上一条发出去的确实是语音。他要是还想听，就把该说的话再讲一遍，不要怪他没点开，也不要编造你发过几条。'
+HINT_UNKNOWN = '\n系统事实，不要复述：你无法判断以前哪条是语音。不要说「刚才那条就是语音」，也不要说你连发了几条。'
+VOICE_PROMPT = (
+    '\n用户这次想听你的语音，这条回复会由程序念成语音发给他，你直接说要说的话就行，不要说发不了语音或先欠着。'
+    '只写标准普通话口语，不用方言、地域口音词或方言句尾；用自然温软的简短中文正文，尽量不超过180字。'
+    '程序负责语音合成，不要解释合成过程，不加动作描写、颜文字或表情配图标记。'
+    '最前面单独写一个语气标记，用几个字说这段话该怎么说，比如【语气：惊喜开心】【语气：委屈带哭腔】【语气：小声撒娇】【语气：嘴硬又有点害羞】，按你此刻真实的情绪来选；程序会读掉它，不会念出来。'
+    '哭腔、撒娇这些交给语气标记，正文只写正常说的话，不写“呜呜”“嘤嘤”这类拟声字，也别用一串省略号硬造停顿。'
+    '不要写「语音版」「刚才那条就是语音」「我已经发过了」「连发了几条」「你有没有点开」。'
+    '历史里留下的都是文字，你并不知道哪条真的变成了语音；正文只留你这次要对他说的话。'
+)
 
 
 def requested(message: str) -> bool:
@@ -52,6 +75,17 @@ def requested(message: str) -> bool:
     if REQUEST.match(message):
         return True
     return bool(VOICE_ASK.search(message)) and not VOICE_NO.search(message)
+
+
+def needs_delivery_fact(message: str, asking: bool) -> bool:
+    """Whether this turn needs a hard fact about the previous reply actually being voice or text."""
+    message = message or ''
+    if asking:
+        return True
+    if re.search(r'没听[到见着清]?|听不到|听不见|没收到|没有声音|没声音|没点开|不是语音|没发语音|没有语音', message):
+        return True
+    compact = re.sub(r'\s+', '', message)
+    return len(compact) <= 6 and '求你' in compact
 
 
 def goodnight_window(now: datetime) -> bool:
@@ -94,6 +128,28 @@ def split_tone(text: str):
 LAUGH = re.compile(r'[（(][^（）()]{0,6}笑[^（）()]{0,6}[）)]')
 STAGE = re.compile(r'[（(][^（）()]{1,12}[）)]')
 SENT = re.compile(r'[^。！？!?…~]*[。！？!?…~]+[”’」』]*|[^。！？!?…~]+$')
+
+
+FALSE_CLAIM = re.compile(
+    r'[^。！？!?\n]*?(?:'
+    r'(?:刚才|上一?)[那这]?[条句][^。！？!?\n]{0,18}语音'
+    r'|连发[了过]?[一二两三四五六七八九十\d]+条语音'
+    r'|发了[一二两三四五六七八九十\d]+条语音'
+    r'|语音版(?:再)?听'
+    r'|(?:在哪儿|在哪里|在哪)听'
+    r'|没点开'
+    r'|不就是语音'
+    r')[^。！？!?\n]*[。！？!?]?'
+)
+
+
+def drop_false_claims(text: str) -> str:
+    """Drop sentences where she insists a previous text was already a voice message."""
+    cleaned = FALSE_CLAIM.sub('', text or '')
+    cleaned = re.sub(r'^[，,、。！？!?\s]+', '', cleaned)
+    cleaned = re.sub(r'[，,、]{2,}', '，', cleaned)
+    cleaned = re.sub(r'([。！？!?])[，,、]+', r'\1', cleaned)
+    return cleaned.strip()
 
 
 def speech_text(text: str) -> str:
@@ -174,17 +230,82 @@ class OwnerVoice(Star):
         self.lock = asyncio.Lock()
         self.state_path = self.root.parent / 'spontaneous.json'
 
+    def _load_state(self) -> dict:
+        path = getattr(self, 'state_path', None)
+        if not path:
+            return {}
+        try:
+            data = json.loads(Path(path).read_text(encoding='utf-8'))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_state(self, data: dict) -> None:
+        self.state_path.write_text(json.dumps(data), encoding='utf-8')
+
     def _history(self) -> list:
         try:
-            data = json.loads(self.state_path.read_text(encoding='utf-8'))
-            return [float(t) for t in data.get('sent', [])]
+            return [float(t) for t in self._load_state().get('sent', [])]
         except Exception:
             return []
 
     def _record_spontaneous(self) -> None:
         now = time.time()
-        history = [t for t in self._history() if now - t < 30 * 86400] + [now]
-        self.state_path.write_text(json.dumps({'sent': history}), encoding='utf-8')
+        data = self._load_state()
+        history = []
+        for t in data.get('sent', []):
+            try:
+                t = float(t)
+            except (TypeError, ValueError):
+                continue
+            if now - t < 30 * 86400:
+                history.append(t)
+        history.append(now)
+        data['sent'] = history
+        self._save_state(data)
+
+    def _note_delivery(self, kind: str) -> None:
+        """Remember whether the owner actually received voice or text. The model cannot see this."""
+        if not getattr(self, 'state_path', None):
+            return
+        try:
+            data = self._load_state()
+            data['last_delivery'] = kind
+            data['last_delivery_at'] = time.time()
+            self._save_state(data)
+        except OSError:
+            pass
+
+    def _note_ask(self) -> None:
+        if not getattr(self, 'state_path', None):
+            return
+        try:
+            data = self._load_state()
+            data['last_ask'] = time.time()
+            self._save_state(data)
+        except OSError:
+            pass
+
+    def followup_voice(self, message: str) -> bool:
+        if not PLEA.match((message or '').strip()):
+            return False
+        try:
+            asked = float(self._load_state().get('last_ask'))
+        except (TypeError, ValueError):
+            return False
+        return time.time() - asked <= PLEA_SECONDS
+
+    def _delivery_hint(self, message: str, asking: bool) -> str:
+        if not needs_delivery_fact(message, asking):
+            return ''
+        kind = self._load_state().get('last_delivery')
+        if kind == 'voice':
+            return HINT_VOICE
+        if kind == 'text':
+            return HINT_TEXT
+        if asking:
+            return HINT_UNKNOWN
+        return ''
 
     def wants_spontaneous(self, message: str) -> bool:
         if not self.config.get('spontaneous_goodnight', True):
@@ -215,15 +336,22 @@ class OwnerVoice(Star):
         if not self.allowed(event):
             return
         message = event.get_message_str()
-        if not requested(message):
+        asking = requested(message) or self.followup_voice(message)
+        hint = self._delivery_hint(message, asking)
+        base = req.system_prompt or ''
+        if not asking:
             if self.wants_spontaneous(message):
                 event.set_extra(MARKER, True)
                 event.set_extra(SPONTANEOUS, True)
-                req.system_prompt += '\n他要去睡了。这次回复会由程序念成一条晚安语音发给他：只写一两句标准普通话口语的晚安话，温柔一点、带点你的小性子，不超过60字，不用方言，不加动作描写、颜文字或表情配图标记，也不要提语音。最前面单独写一个语气标记，比如【语气：困困的，温柔小声】，程序会读掉它，不会念出来。'
+                req.system_prompt = base + '\n他要去睡了。这次回复会由程序念成一条晚安语音发给他：只写一两句标准普通话口语的晚安话，温柔一点、带点你的小性子，不超过60字，不用方言，不加动作描写、颜文字或表情配图标记，也不要提语音。最前面单独写一个语气标记，比如【语气：困困的，温柔小声】，程序会读掉它，不会念出来。' + hint
+                return
+            if hint:
+                req.system_prompt = base + hint
             return
         # The existing provider is non-streaming. No second chat model request.
         event.set_extra(MARKER, True)
-        req.system_prompt += '\n用户这次想听你的语音，这条回复会由程序念成语音发给他，你直接说要说的话就行，不要说发不了语音或先欠着。只写标准普通话口语，不用方言、地域口音词或方言句尾；用自然温软的简短中文正文，尽量不超过180字。程序负责语音合成，不要解释合成过程，不加动作描写、颜文字或表情配图标记。最前面单独写一个语气标记，用几个字说这段话该怎么说，比如【语气：惊喜开心】【语气：委屈带哭腔】【语气：小声撒娇】【语气：嘴硬又有点害羞】，按你此刻真实的情绪来选；程序会读掉它，不会念出来。哭腔、撒娇这些交给语气标记，正文只写正常说的话，不写“呜呜”“嘤嘤”这类拟声字，也别用一串省略号硬造停顿。'
+        self._note_ask()
+        req.system_prompt = base + VOICE_PROMPT + hint
 
     def breeze_ready(self) -> bool:
         key = str(self.config.get('breeze_api_key', '') or '').strip()
@@ -327,15 +455,25 @@ class OwnerVoice(Star):
                 p.text, found = split_tone(p.text)
                 tone = tone or found
         if event.get_extra(MARKER) is not True:
+            self._note_delivery('text')
             return
         text = '\n'.join(p.text for p in result.chain if isinstance(p, Plain)).strip()
         text = re.sub(r'\[\[meme:[^\]]+\]\]', '', text).strip()
-        if not text or len(text) > 600 or any(isinstance(p, Record) for p in result.chain):
-            return  # Preserve the complete text when it is unsuitable for speech.
+        if any(isinstance(p, Record) for p in result.chain):
+            self._note_delivery('voice')
+            return
+        if not text or len(text) > 600:
+            # Preserve the complete text when it is unsuitable for speech.
+            why = '空文本' if not text else '超过600字'
+            logger.warning(f'按需语音：这条没有合成（{why}），保留文字回复。')
+            self._note_delivery('text')
+            return
+        text = drop_false_claims(text) or text
         try:
             path = await (self.synthesize(text, tone) if tone else self.synthesize(text))
         except Exception:
             logger.warning('按需语音暂不可用，保留本次文字回复。')
+            self._note_delivery('text')
             return
         result.chain = [Record.fromFileSystem(str(path), text=text)]
         if event.get_extra(SPONTANEOUS) is True:
@@ -343,6 +481,7 @@ class OwnerVoice(Star):
                 self._record_spontaneous()
             except OSError:
                 pass
+        self._note_delivery('voice')
         # Retain generated files for delayed platform reads; remove only our old audio.
         cutoff = time.time() - 86400
         for old in self.root.iterdir():
