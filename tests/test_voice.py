@@ -172,12 +172,169 @@ class VoiceChecks(IsolatedAsyncioTestCase):
         self.assertIn('确实是语音', req.system_prompt)
         self.assertIn('不要怪他没点开', req.system_prompt)
 
+    async def test_explicit_ask_holds_voice_for_five_minutes(self):
+        import json, time
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.config['care_voice'] = False
+        asked = time.time() - 60
+        self.plugin.state_path.write_text(json.dumps({'last_ask': asked}), encoding='utf-8')
+        self.event.get_message_str = lambda: '我到宿舍了'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertIn('标准普通话', req.system_prompt)
+        self.assertEqual(self.plugin._load_state()['last_ask'], asked)
+        self.extra.clear()
+        self.plugin.state_path.write_text(json.dumps({'last_ask': time.time() - 400}), encoding='utf-8')
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+
+    async def test_refusal_ends_voice_hold(self):
+        import json, time
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text(json.dumps({'last_ask': time.time()}), encoding='utf-8')
+        self.event.get_message_str = lambda: '别用语音'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+        self.assertEqual(self.plugin._load_state()['last_ask'], 0)
+
+
+class CareVoiceChecks(IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.plugin = object.__new__(module.OwnerVoice)
+        self.plugin.config = {
+            'enabled': True, 'owner_session': OWNER, 'care_voice': True,
+            'care_voice_probability': 0.08, 'care_voice_night_probability': 0.12,
+            'spontaneous_goodnight': False,
+        }
+        self.plugin.root = Path(self.temp.name)
+        self.plugin.state_path = self.plugin.root / 'spontaneous.json'
+        self.extra = {}
+        self.result = SimpleNamespace(chain=[Plain('路上慢点，到了跟我说一声。')], is_llm_result=lambda: True)
+        self.event = SimpleNamespace(
+            unified_msg_origin=OWNER, get_sender_id=lambda: '00000001',
+            get_platform_name=lambda: 'aiocqhttp', is_private_chat=lambda: True,
+            get_message_str=lambda: '我到宿舍了', get_extra=self.extra.get,
+            set_extra=self.extra.__setitem__, get_result=lambda: self.result,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_night_window_and_care_detection(self):
+        from datetime import datetime
+        self.assertFalse(module.night_care_window(datetime(2026, 11, 9, 21, 30, tzinfo=module.CST)))
+        self.assertTrue(module.night_care_window(datetime(2026, 11, 9, 22, 0, tzinfo=module.CST)))
+        self.assertTrue(module.night_care_window(datetime(2026, 11, 9, 2, 0, tzinfo=module.CST)))
+        self.assertFalse(module.night_care_window(datetime(2026, 11, 9, 6, 0, tzinfo=module.CST)))
+        self.assertTrue(module.care_moment('我到宿舍了'))
+        self.assertTrue(module.care_moment('今天好累'))
+        self.assertFalse(module.care_moment('我去睡了，晚安'))
+        self.assertFalse(module.care_moment('你到了吗'))
+        self.assertFalse(module.care_moment('为什么这么晚'))
+        self.assertFalse(module.care_moment('你好'))
+        self.assertTrue(module.caring_reply('路上慢点，到了跟我说一声。'))
+        self.assertFalse(module.caring_reply('好的，三点见。'))
+        self.assertFalse(module.caring_reply('小心' + '啊' * 80))
+
+    async def test_day_probability_is_small_and_night_is_a_bit_higher(self):
+        from datetime import datetime
+        from unittest.mock import patch
+        day = datetime(2026, 11, 9, 15, 0, tzinfo=module.CST)
+        night = datetime(2026, 11, 9, 23, 10, tzinfo=module.CST)
+
+        async def roll(when, value):
+            self.extra.clear()
+            req = SimpleNamespace(system_prompt='人设')
+            with patch.object(module, 'datetime') as clock, patch.object(module.random, 'random', return_value=value):
+                clock.now.return_value = when
+                await self.plugin.mark_requested(self.event, req)
+            return req
+
+        missed = await roll(day, 0.10)
+        self.assertFalse(self.extra.get(module.CARE))
+        self.assertEqual(missed.system_prompt, '人设')
+        hit = await roll(day, 0.05)
+        self.assertTrue(self.extra.get(module.CARE))
+        self.assertNotIn(module.MARKER, self.extra)
+        self.assertIn('关心', hit.system_prompt)
+        night_hit = await roll(night, 0.10)
+        self.assertTrue(self.extra.get(module.CARE))
+        self.assertIn('关心', night_hit.system_prompt)
+        self.extra.clear()
+        await roll(night, 0.20)
+        self.assertFalse(self.extra.get(module.CARE))
+
+    async def test_care_reply_is_spoken_until_the_gap(self):
+        import json, time
+        from unittest.mock import patch
+        audio = self.plugin.root / 'care.wav'
+        self.extra[module.CARE] = True
+        self.plugin.synthesize = AsyncMock(return_value=audio)
+        await self.plugin.speak_when_requested(self.event)
+        self.assertIsInstance(self.result.chain[0], Record)
+        self.assertGreater(self.plugin._load_state().get('last_care_at', 0), 0)
+        self.extra.clear()
+        self.result.chain = [Plain('路上慢点，到了跟我说一声。')]
+        with patch.object(module.random, 'random', return_value=0):
+            req = SimpleNamespace(system_prompt='人设')
+            await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.CARE))
+        self.plugin.state_path.write_text(json.dumps({'last_care_at': time.time() - 21 * 60}), encoding='utf-8')
+        with patch.object(module.random, 'random', return_value=0):
+            req = SimpleNamespace(system_prompt='人设')
+            await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra.get(module.CARE))
+
+    async def test_non_care_answer_stays_text(self):
+        self.extra[module.CARE] = True
+        self.result.chain = [Plain('好的，三点见。')]
+        self.plugin.synthesize = AsyncMock()
+        await self.plugin.speak_when_requested(self.event)
+        self.plugin.synthesize.assert_not_awaited()
+        self.assertEqual(self.result.chain[0].text, '好的，三点见。')
+
+    async def test_goodnight_words_stay_on_their_own_quota(self):
+        from unittest.mock import patch
+        self.event.get_message_str = lambda: '我去睡了，晚安'
+        self.result.chain = [Plain('晚安，早点睡。')]
+        self.plugin.synthesize = AsyncMock()
+        with patch.object(module.random, 'random', return_value=0):
+            await self.plugin.speak_when_requested(self.event)
+        self.plugin.synthesize.assert_not_awaited()
+
+    async def test_ordinary_chat_can_speak_a_short_care_line(self):
+        from unittest.mock import patch
+        self.event.get_message_str = lambda: '今天课好多'
+        req = SimpleNamespace(system_prompt='人设')
+        with patch.object(module.random, 'random', return_value=0):
+            await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra)
+        self.assertEqual(req.system_prompt, '人设')
+        self.result.chain = [Plain('别太累，吃点东西。')]
+        self.plugin.synthesize = AsyncMock(return_value=self.plugin.root / 's.wav')
+        with patch.object(module.random, 'random', return_value=0):
+            await self.plugin.speak_when_requested(self.event)
+        self.assertIsInstance(self.result.chain[0], Record)
+        self.plugin.state_path.write_text('{}', encoding='utf-8')
+        self.result.chain = [Plain('别太累，吃点东西。')]
+        self.plugin.synthesize = AsyncMock()
+        with patch.object(module.random, 'random', return_value=0.5):
+            await self.plugin.speak_when_requested(self.event)
+        self.plugin.synthesize.assert_not_awaited()
+
 
 class SpontaneousChecks(IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.plugin = object.__new__(module.OwnerVoice)
-        self.plugin.config = {'enabled': True, 'owner_session': OWNER, 'spontaneous_probability': 1.0}
+        self.plugin.config = {
+            'enabled': True, 'owner_session': OWNER, 'spontaneous_probability': 1.0,
+            'care_voice': False,
+        }
         self.plugin.root = Path(self.temp.name) / 'audio'
         self.plugin.root.mkdir()
         self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'

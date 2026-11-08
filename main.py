@@ -2,6 +2,8 @@
 
 Also, rarely, a spontaneous short goodnight voice in the owner's private chat
 (late evening, owner says goodnight, at most 2 per rolling 7 days, >=2 days apart).
+After an explicit ask, the next few minutes stay spoken. Short caring replies
+can also be spoken, a bit more often after 22:00.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ VOICE = 'zh-CN-XiaoyiNeural'
 VOICE_RATE = '+5%'
 VOICE_PITCH = '+12Hz'
 MARKER = '_owner_voice_requested'
+CARE = '_owner_voice_care'
 SPONTANEOUS = '_owner_voice_spontaneous'
 GOODNIGHT = re.compile(r'晚安|(我|先|要|该|准备|这就)去?睡(了|啦|觉|咯|喽)|洗洗睡|困死了|好困')
 QUESTION = re.compile(r'[吗么?？]')
@@ -52,10 +55,14 @@ VOICE_NO = re.compile(
     r'|会(?:不会)?(?:用|发)?语音.*[吗么?？]'
     r'|[“"「『].{0,20}语音.{0,20}[”"」』]'
     r'|[不别甭]想听')
-# 刚明确要过语音的几分钟里，再补一句很短的恳求，也当成还在要语音
-PLEA = re.compile(
-    r'^(?:你|请)?(?:求你了?|拜托了?|再来一?次|再发一?次|还是没有啊?|没有啊?|没听到|听不到|再说一?遍|再讲一?遍|再念一?遍)[!！。…~～啊呀]*$')
-PLEA_SECONDS = 180
+# 主人自己先说了出门、到家、累了这类情况，回复多半是关心，才有资格参与自动语音
+CARE_MOMENT = re.compile(
+    r'出门|到家|到宿舍|到了|下班|上班|好累|太累|困了|睡了|吃饭|想你|不舒服|头疼|头痛|感冒|下雨|加班|回来了|我走了|饿了|好冷|好热|忙完|忙死|没吃饭|淋雨')
+# 回复本身是短叮嘱时才真的念，避免把回答问题也念成语音
+CARE_REPLY = re.compile(
+    r'慢点|小心|早点睡|晚安|吃饭|想你|别熬|熬夜|平安|多穿|喝水|吃药|别玩手机|心疼|抱抱|别着凉|饿不饿|吃了没|早点休息|报平安|过马路|注意身体|别太累|吃点东西|别饿着|添件衣服|路上慢点|到了跟我')
+CARE_MAX = 80
+CARE_GAP_SECONDS = 20 * 60
 HINT_TEXT = '\n系统事实，不要复述：你上一条发出去的是文字，不是语音。不要说「刚才那条就是语音」「我已经发过了」「连发了几条」。'
 HINT_VOICE = '\n系统事实，不要复述：你上一条发出去的确实是语音。他要是还想听，就把该说的话再讲一遍，不要怪他没点开，也不要编造你发过几条。'
 HINT_UNKNOWN = '\n系统事实，不要复述：你无法判断以前哪条是语音。不要说「刚才那条就是语音」，也不要说你连发了几条。'
@@ -67,6 +74,12 @@ VOICE_PROMPT = (
     '哭腔、撒娇这些交给语气标记，正文只写正常说的话，不写“呜呜”“嘤嘤”这类拟声字，也别用一串省略号硬造停顿。'
     '不要写「语音版」「刚才那条就是语音」「我已经发过了」「连发了几条」「你有没有点开」。'
     '历史里留下的都是文字，你并不知道哪条真的变成了语音；正文只留你这次要对他说的话。'
+)
+CARE_PROMPT = (
+    '\n这条回复有较小概率被念成语音，而且只有你主要在关心他、叮嘱他的时候才会念。'
+    '若是在关心他：写成一两句标准普通话口语，不超过80字，不用方言，不加动作描写或颜文字，'
+    '最前面单独写一个语气标记，比如【语气：温柔小声】，程序会读掉，不要提语音。'
+    '若是在回答具体问题或聊别的事：照常写，不必缩短。'
 )
 
 
@@ -91,6 +104,29 @@ def needs_delivery_fact(message: str, asking: bool) -> bool:
 def goodnight_window(now: datetime) -> bool:
     hour = now.astimezone(CST).hour
     return hour >= 21 or hour < 3
+
+
+def night_care_window(now: datetime) -> bool:
+    """After 22:00 Beijing time, until 06:00, automatic care voice is a little more likely."""
+    hour = now.astimezone(CST).hour
+    return hour >= 22 or hour < 6
+
+
+def care_moment(message: str) -> bool:
+    """Owner shared a life moment she would usually answer with care, not a question or a task."""
+    message = message or ''
+    if not message or requested(message) or VOICE_NO.search(message) or QUESTION.search(message):
+        return False
+    if GOODNIGHT.search(message):
+        return False
+    if re.search(r'为什么|怎么|如何|啥意思|什么是|帮我|解释一下|代码', message):
+        return False
+    return bool(CARE_MOMENT.search(message))
+
+
+def caring_reply(text: str) -> bool:
+    text = (text or '').strip()
+    return bool(text) and len(text) <= CARE_MAX and bool(CARE_REPLY.search(text))
 
 
 def quota_ok(history: list, now: float, per_week: int, min_gap_days: float) -> bool:
@@ -286,14 +322,87 @@ class OwnerVoice(Star):
         except OSError:
             pass
 
-    def followup_voice(self, message: str) -> bool:
-        if not PLEA.match((message or '').strip()):
+    def _clear_hold(self) -> None:
+        if not getattr(self, 'state_path', None):
+            return
+        try:
+            data = self._load_state()
+            if not data.get('last_ask'):
+                return
+            data['last_ask'] = 0
+            self._save_state(data)
+        except OSError:
+            pass
+
+    def _hold_seconds(self) -> float:
+        try:
+            minutes = float(self.config.get('voice_hold_minutes', 5))
+        except (TypeError, ValueError):
+            minutes = 5
+        return minutes * 60 if minutes > 0 else 0
+
+    def voice_hold(self, message: str) -> bool:
+        """After an explicit ask, every reply for a few minutes is spoken. A refusal ends it."""
+        if VOICE_NO.search(message or ''):
             return False
         try:
-            asked = float(self._load_state().get('last_ask'))
+            asked = float(self._load_state().get('last_ask') or 0)
         except (TypeError, ValueError):
             return False
-        return time.time() - asked <= PLEA_SECONDS
+        if asked <= 0:
+            return False
+        return time.time() - asked <= self._hold_seconds()
+
+    def _care_gap_ok(self) -> bool:
+        try:
+            last = float(self._load_state().get('last_care_at') or 0)
+        except (TypeError, ValueError):
+            return True
+        return time.time() - last >= CARE_GAP_SECONDS
+
+    def _note_care(self) -> None:
+        if not getattr(self, 'state_path', None):
+            return
+        try:
+            data = self._load_state()
+            data['last_care_at'] = time.time()
+            self._save_state(data)
+        except OSError:
+            pass
+
+    def _care_probability(self, now: datetime | None = None) -> float:
+        now = now or datetime.now(CST)
+        night = night_care_window(now)
+        key = 'care_voice_night_probability' if night else 'care_voice_probability'
+        default = 0.12 if night else 0.08
+        try:
+            probability = float(self.config.get(key, default) or 0)
+        except (TypeError, ValueError):
+            probability = default
+        return min(max(probability, 0.0), 1.0)
+
+    def wants_care_voice(self, message: str) -> bool:
+        if not self.config.get('care_voice', True):
+            return False
+        if not care_moment(message) or not self._care_gap_ok():
+            return False
+        return random.random() < self._care_probability()
+
+    def _surprise_care(self, event: AstrMessageEvent, text: str) -> bool:
+        """A short caring reply can still be spoken when his message was not an obvious care moment."""
+        if not self.config.get('care_voice', True):
+            return False
+        message = event.get_message_str() or ''
+        if care_moment(message) or requested(message) or VOICE_NO.search(message):
+            return False
+        if GOODNIGHT.search(message) and not QUESTION.search(message):
+            return False
+        if not self._care_gap_ok():
+            return False
+        spoken = drop_false_claims(text) or text
+        if not caring_reply(spoken):
+            return False
+        return random.random() < self._care_probability()
 
     def _delivery_hint(self, message: str, asking: bool) -> str:
         if not needs_delivery_fact(message, asking):
@@ -336,7 +445,10 @@ class OwnerVoice(Star):
         if not self.allowed(event):
             return
         message = event.get_message_str()
-        asking = requested(message) or self.followup_voice(message)
+        explicit = requested(message)
+        if not explicit and VOICE_NO.search(message or ''):
+            self._clear_hold()
+        asking = explicit or self.voice_hold(message)
         hint = self._delivery_hint(message, asking)
         base = req.system_prompt or ''
         if not asking:
@@ -345,12 +457,17 @@ class OwnerVoice(Star):
                 event.set_extra(SPONTANEOUS, True)
                 req.system_prompt = base + '\n他要去睡了。这次回复会由程序念成一条晚安语音发给他：只写一两句标准普通话口语的晚安话，温柔一点、带点你的小性子，不超过60字，不用方言，不加动作描写、颜文字或表情配图标记，也不要提语音。最前面单独写一个语气标记，比如【语气：困困的，温柔小声】，程序会读掉它，不会念出来。' + hint
                 return
+            if self.wants_care_voice(message):
+                event.set_extra(CARE, True)
+                req.system_prompt = base + CARE_PROMPT + hint
+                return
             if hint:
                 req.system_prompt = base + hint
             return
         # The existing provider is non-streaming. No second chat model request.
         event.set_extra(MARKER, True)
-        self._note_ask()
+        if explicit:
+            self._note_ask()
         req.system_prompt = base + VOICE_PROMPT + hint
 
     def breeze_ready(self) -> bool:
@@ -454,21 +571,31 @@ class OwnerVoice(Star):
             if isinstance(p, Plain) and TONE_TAG.search(p.text or ''):
                 p.text, found = split_tone(p.text)
                 tone = tone or found
-        if event.get_extra(MARKER) is not True:
-            self._note_delivery('text')
-            return
+        forced = event.get_extra(MARKER) is True
+        care = event.get_extra(CARE) is True
         text = '\n'.join(p.text for p in result.chain if isinstance(p, Plain)).strip()
         text = re.sub(r'\[\[meme:[^\]]+\]\]', '', text).strip()
+        if not forced and not care and self._surprise_care(event, text):
+            care = True
+        if not forced and not care:
+            self._note_delivery('text')
+            return
         if any(isinstance(p, Record) for p in result.chain):
             self._note_delivery('voice')
             return
-        if not text or len(text) > 600:
+        if care and not forced:
+            text = drop_false_claims(text) or text
+            if not caring_reply(text):
+                self._note_delivery('text')
+                return
+        elif not text or len(text) > 600:
             # Preserve the complete text when it is unsuitable for speech.
             why = '空文本' if not text else '超过600字'
             logger.warning(f'按需语音：这条没有合成（{why}），保留文字回复。')
             self._note_delivery('text')
             return
-        text = drop_false_claims(text) or text
+        else:
+            text = drop_false_claims(text) or text
         try:
             path = await (self.synthesize(text, tone) if tone else self.synthesize(text))
         except Exception:
@@ -481,6 +608,8 @@ class OwnerVoice(Star):
                 self._record_spontaneous()
             except OSError:
                 pass
+        if care and not forced:
+            self._note_care()
         self._note_delivery('voice')
         # Retain generated files for delayed platform reads; remove only our old audio.
         cutoff = time.time() - 86400
