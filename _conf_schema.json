@@ -1,0 +1,56 @@
+{
+  "enabled": {
+    "description": "启用按需语音",
+    "type": "bool",
+    "default": false,
+    "hint": "总开关。关闭时不发语音、不主动发晚安语音，也不会改写任何回复。"
+  },
+  "owner_session": {
+    "description": "主人的完整私聊会话 ID",
+    "type": "string",
+    "default": "",
+    "hint": "格式为 平台名:消息类型:用户QQ号，例如 aiocqhttp:FriendMessage:1234567890。必须填完整会话 ID，不能只填 QQ 号；填错时插件完全不生效。"
+  },
+  "spontaneous_goodnight": {
+    "description": "偶尔主动发晚安语音",
+    "type": "bool",
+    "default": true,
+    "hint": "北京时间 21:00 到次日 03:00，主人在私聊里说晚安/去睡且不是问句时，有一定概率把这次回复念成语音。"
+  },
+  "spontaneous_per_week": {
+    "description": "主动晚安语音每 7 天上限",
+    "type": "int",
+    "default": 2,
+    "hint": "滚动 7 天窗口内的成功发送次数上限；两次之间代码还固定要求至少间隔 2 天。"
+  },
+  "spontaneous_probability": {
+    "description": "满足条件时的触发概率",
+    "type": "float",
+    "default": 0.5,
+    "hint": "0 到 1 之间的小数；1 表示只要满足条件就一定触发。"
+  },
+  "breeze_api_key": {
+    "description": "BreezeBlue API key（留空则用微软免费声音）",
+    "type": "string",
+    "default": "",
+    "hint": "在 BreezeBlue 的开发者页面申请。连接失败、额度用完或返回错误时，会自动退回微软 edge-tts 声音；key 只存在 AstrBot 配置里，不会写进语音文件。"
+  },
+  "breeze_voice_id": {
+    "description": "BreezeBlue 音色 ID",
+    "type": "string",
+    "default": "",
+    "hint": "只接受 4 到 64 位的字母、数字、下划线或连字符（例如 voc_abc123）；为空或格式不对时视为未配置，直接使用微软声音。"
+  },
+  "breeze_speed": {
+    "description": "BreezeBlue 语速",
+    "type": "float",
+    "default": 1.0,
+    "hint": "范围 0.5 到 2.0，超出范围会被代码自动夹到边界值。"
+  },
+  "breeze_instructions": {
+    "description": "BreezeBlue 演绎提示（可空）",
+    "type": "string",
+    "default": "自然的口语，语气轻松亲近，偶尔带点笑意。",
+    "hint": "写给语音模型的整体演绎要求，最长取前 300 字；模型回复里的【语气：…】标记会作为本次语气拼在这段提示前面。"
+  }
+}
