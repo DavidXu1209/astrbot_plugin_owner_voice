@@ -33,10 +33,14 @@ class VoiceChecks(IsolatedAsyncioTestCase):
 
     async def test_scope_and_explicit_trigger(self):
         for value in ('你好', '你会用语音回复吗', '文档里写着“语音：你好”', '别用语音回复', '不要发语音了',
-                      '我刚才听了语音', '语音识别好难', '我发语音给你了', '不用语音，打字就行', '你会不会发语音？'):
+                      '我刚才听了语音', '语音识别好难', '我发语音给你了', '不用语音，打字就行', '你会不会发语音？',
+                      '求你了', '我喜欢听语音', '听到语音了', '我刚才听了语音版', '不想听语音', '不要听语音',
+                      '我不想听你的声音', '主要是语音功能', '语音识别，语音合成都难'):
             self.assertFalse(module.requested(value), value)
         for value in ('语音：你好', '请用语音回答我', '用语音回复我一句你好', '/语音 你好', '用语音说', '发个语音给我',
-                      '你用语音给我加加油', '语音回我', '说给我听', '我想听你的声音', '给我发条语音', '能用语音说一下吗'):
+                      '你用语音给我加加油', '语音回我', '说给我听', '我想听你的声音', '给我发条语音', '能用语音说一下吗',
+                      '语音语音', '我要听语音', '我要听语音版的', '用语音给我发消息', '给我语音', '再发一遍语音',
+                      '再听一遍语音', '语音呢', '想听语音', '听一下语音', '语音，语音', '发一下语音'):
             self.assertTrue(module.requested(value), value)
         self.assertTrue(self.plugin.allowed(self.event))
         self.event.unified_msg_origin = 'acceptance:GroupMessage:00000001'
@@ -65,6 +69,47 @@ class VoiceChecks(IsolatedAsyncioTestCase):
         self.assertEqual(self.result.chain[0].text, '这是合成测试。')
         self.plugin.synthesize.assert_awaited_once()
 
+    async def test_record_omits_false_voice_claim(self):
+        self.extra[module.MARKER] = True
+        self.result.chain = [Plain('刚才那条不就是语音嘛。路上慢点，晚安。')]
+        audio = self.plugin.root / 'spoken.wav'
+        seen = []
+
+        async def synth(text, tone=''):
+            seen.append(text)
+            return audio
+
+        self.plugin.synthesize = synth
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(seen, ['路上慢点，晚安。'])
+        self.assertEqual(self.result.chain[0].text, '路上慢点，晚安。')
+
+    async def test_voice_keeps_sticker_and_meme_tag(self):
+        class Pic:
+            pass
+
+        pic = Pic()
+        self.extra[module.MARKER] = True
+        self.result.chain = [Plain('给你补一张。[[meme:委屈]]'), pic]
+        audio = self.plugin.root / 'spoken.wav'
+        seen = []
+
+        async def synth(text, tone=''):
+            seen.append(text)
+            return audio
+
+        self.plugin.synthesize = synth
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(seen, ['给你补一张。'])
+        self.assertIsInstance(self.result.chain[0], Record)
+        self.assertEqual(self.result.chain[0].text, '给你补一张。')
+        self.assertIs(self.result.chain[1], pic)
+        self.assertEqual(len(self.result.chain), 2)
+
+        self.result.chain = [Plain('好。[[meme:开心]][[meme:抱抱]]')]
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual([p.text for p in self.result.chain[1:]], ['[[meme:开心]]', '[[meme:抱抱]]'])
+
     async def test_success_produces_native_record(self):
         self.extra[module.MARKER] = True
         audio = self.plugin.root / ('a'*32+'.mp3')
@@ -82,12 +127,240 @@ class VoiceChecks(IsolatedAsyncioTestCase):
         await self.plugin.speak_when_requested(self.event)
         self.plugin.synthesize.assert_not_awaited()
 
+    async def test_plain_plea_is_marked_and_forbids_false_claim(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text('{"last_delivery": "text"}', encoding='utf-8')
+        self.event.get_message_str = lambda: '我要听语音'
+        req = SimpleNamespace(system_prompt='原有人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertNotIn(module.SPONTANEOUS, self.extra)
+        self.assertIn('标准普通话', req.system_prompt)
+        self.assertIn('刚才那条', req.system_prompt)
+        self.assertIn('上一条发出去的是文字', req.system_prompt)
+        self.assertIn('原有人设', req.system_prompt)
+
+    async def test_repeated_voice_word_requests_speech(self):
+        self.event.get_message_str = lambda: '语音语音'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertIn(module.HINT_UNKNOWN.strip(), req.system_prompt)
+
+    async def test_delivery_is_recorded_for_the_next_turn(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(self.plugin._load_state()['last_delivery'], 'text')
+        self.extra[module.MARKER] = True
+        self.plugin.synthesize = AsyncMock(side_effect=TimeoutError())
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(self.plugin._load_state()['last_delivery'], 'text')
+        self.assertIsInstance(self.result.chain[0], Plain)
+        audio = self.plugin.root / 'spoken.wav'
+        self.plugin.synthesize = AsyncMock(return_value=audio)
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(self.plugin._load_state()['last_delivery'], 'voice')
+        self.assertIsInstance(self.result.chain[0], Record)
+
+    async def test_short_plea_after_a_recent_ask_is_voice(self):
+        import time
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text(
+            '{"last_ask": %s, "last_delivery": "text"}' % time.time(), encoding='utf-8')
+        self.event.get_message_str = lambda: '求你了'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertIn('上一条发出去的是文字', req.system_prompt)
+        self.extra.clear()
+        self.plugin.state_path.write_text(
+            '{"last_ask": %s, "last_delivery": "text"}' % (time.time() - 1000), encoding='utf-8')
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+        self.assertIn('上一条发出去的是文字', req.system_prompt)
+
+    async def test_unrelated_voice_mention_keeps_prompt(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text('{"last_delivery": "voice"}', encoding='utf-8')
+        self.event.get_message_str = lambda: '语音识别好难'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+        self.assertEqual(req.system_prompt, '人设')
+
+    async def test_recent_voice_is_not_denied(self):
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text('{"last_delivery": "voice"}', encoding='utf-8')
+        self.event.get_message_str = lambda: '我要听语音版的'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertIn('确实是语音', req.system_prompt)
+        self.assertIn('不要怪他没点开', req.system_prompt)
+
+    async def test_explicit_ask_holds_voice_for_five_minutes(self):
+        import json, time
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.config['care_voice'] = False
+        asked = time.time() - 60
+        self.plugin.state_path.write_text(json.dumps({'last_ask': asked}), encoding='utf-8')
+        self.event.get_message_str = lambda: '我到宿舍了'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra[module.MARKER])
+        self.assertIn('标准普通话', req.system_prompt)
+        self.assertEqual(self.plugin._load_state()['last_ask'], asked)
+        self.extra.clear()
+        self.plugin.state_path.write_text(json.dumps({'last_ask': time.time() - 400}), encoding='utf-8')
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+
+    async def test_refusal_ends_voice_hold(self):
+        import json, time
+        self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
+        self.plugin.state_path.write_text(json.dumps({'last_ask': time.time()}), encoding='utf-8')
+        self.event.get_message_str = lambda: '别用语音'
+        req = SimpleNamespace(system_prompt='人设')
+        await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.MARKER))
+        self.assertEqual(self.plugin._load_state()['last_ask'], 0)
+
+
+class CareVoiceChecks(IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.plugin = object.__new__(module.OwnerVoice)
+        self.plugin.config = {
+            'enabled': True, 'owner_session': OWNER, 'care_voice': True,
+            'care_voice_probability': 0.08, 'care_voice_night_probability': 0.12,
+            'spontaneous_goodnight': False,
+        }
+        self.plugin.root = Path(self.temp.name)
+        self.plugin.state_path = self.plugin.root / 'spontaneous.json'
+        self.extra = {}
+        self.result = SimpleNamespace(chain=[Plain('路上慢点，到了跟我说一声。')], is_llm_result=lambda: True)
+        self.event = SimpleNamespace(
+            unified_msg_origin=OWNER, get_sender_id=lambda: '00000001',
+            get_platform_name=lambda: 'aiocqhttp', is_private_chat=lambda: True,
+            get_message_str=lambda: '我到宿舍了', get_extra=self.extra.get,
+            set_extra=self.extra.__setitem__, get_result=lambda: self.result,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_night_window_and_care_detection(self):
+        from datetime import datetime
+        self.assertFalse(module.night_care_window(datetime(2026, 11, 9, 21, 30, tzinfo=module.CST)))
+        self.assertTrue(module.night_care_window(datetime(2026, 11, 9, 22, 0, tzinfo=module.CST)))
+        self.assertTrue(module.night_care_window(datetime(2026, 11, 9, 2, 0, tzinfo=module.CST)))
+        self.assertFalse(module.night_care_window(datetime(2026, 11, 9, 6, 0, tzinfo=module.CST)))
+        self.assertTrue(module.care_moment('我到宿舍了'))
+        self.assertTrue(module.care_moment('今天好累'))
+        self.assertFalse(module.care_moment('我去睡了，晚安'))
+        self.assertFalse(module.care_moment('你到了吗'))
+        self.assertFalse(module.care_moment('为什么这么晚'))
+        self.assertFalse(module.care_moment('你好'))
+        self.assertTrue(module.caring_reply('路上慢点，到了跟我说一声。'))
+        self.assertFalse(module.caring_reply('好的，三点见。'))
+        self.assertFalse(module.caring_reply('小心' + '啊' * 80))
+
+    async def test_day_probability_is_small_and_night_is_a_bit_higher(self):
+        from datetime import datetime
+        from unittest.mock import patch
+        day = datetime(2026, 11, 9, 15, 0, tzinfo=module.CST)
+        night = datetime(2026, 11, 9, 23, 10, tzinfo=module.CST)
+
+        async def roll(when, value):
+            self.extra.clear()
+            req = SimpleNamespace(system_prompt='人设')
+            with patch.object(module, 'datetime') as clock, patch.object(module.random, 'random', return_value=value):
+                clock.now.return_value = when
+                await self.plugin.mark_requested(self.event, req)
+            return req
+
+        missed = await roll(day, 0.10)
+        self.assertFalse(self.extra.get(module.CARE))
+        self.assertEqual(missed.system_prompt, '人设')
+        hit = await roll(day, 0.05)
+        self.assertTrue(self.extra.get(module.CARE))
+        self.assertNotIn(module.MARKER, self.extra)
+        self.assertIn('关心', hit.system_prompt)
+        night_hit = await roll(night, 0.10)
+        self.assertTrue(self.extra.get(module.CARE))
+        self.assertIn('关心', night_hit.system_prompt)
+        self.extra.clear()
+        await roll(night, 0.20)
+        self.assertFalse(self.extra.get(module.CARE))
+
+    async def test_care_reply_is_spoken_until_the_gap(self):
+        import json, time
+        from unittest.mock import patch
+        audio = self.plugin.root / 'care.wav'
+        self.extra[module.CARE] = True
+        self.plugin.synthesize = AsyncMock(return_value=audio)
+        await self.plugin.speak_when_requested(self.event)
+        self.assertIsInstance(self.result.chain[0], Record)
+        self.assertGreater(self.plugin._load_state().get('last_care_at', 0), 0)
+        self.extra.clear()
+        self.result.chain = [Plain('路上慢点，到了跟我说一声。')]
+        with patch.object(module.random, 'random', return_value=0):
+            req = SimpleNamespace(system_prompt='人设')
+            await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra.get(module.CARE))
+        self.plugin.state_path.write_text(json.dumps({'last_care_at': time.time() - 21 * 60}), encoding='utf-8')
+        with patch.object(module.random, 'random', return_value=0):
+            req = SimpleNamespace(system_prompt='人设')
+            await self.plugin.mark_requested(self.event, req)
+        self.assertTrue(self.extra.get(module.CARE))
+
+    async def test_non_care_answer_stays_text(self):
+        self.extra[module.CARE] = True
+        self.result.chain = [Plain('好的，三点见。')]
+        self.plugin.synthesize = AsyncMock()
+        await self.plugin.speak_when_requested(self.event)
+        self.plugin.synthesize.assert_not_awaited()
+        self.assertEqual(self.result.chain[0].text, '好的，三点见。')
+
+    async def test_goodnight_words_stay_on_their_own_quota(self):
+        from unittest.mock import patch
+        self.event.get_message_str = lambda: '我去睡了，晚安'
+        self.result.chain = [Plain('晚安，早点睡。')]
+        self.plugin.synthesize = AsyncMock()
+        with patch.object(module.random, 'random', return_value=0):
+            await self.plugin.speak_when_requested(self.event)
+        self.plugin.synthesize.assert_not_awaited()
+
+    async def test_ordinary_chat_can_speak_a_short_care_line(self):
+        from unittest.mock import patch
+        self.event.get_message_str = lambda: '今天课好多'
+        req = SimpleNamespace(system_prompt='人设')
+        with patch.object(module.random, 'random', return_value=0):
+            await self.plugin.mark_requested(self.event, req)
+        self.assertFalse(self.extra)
+        self.assertEqual(req.system_prompt, '人设')
+        self.result.chain = [Plain('别太累，吃点东西。')]
+        self.plugin.synthesize = AsyncMock(return_value=self.plugin.root / 's.wav')
+        with patch.object(module.random, 'random', return_value=0):
+            await self.plugin.speak_when_requested(self.event)
+        self.assertIsInstance(self.result.chain[0], Record)
+        self.plugin.state_path.write_text('{}', encoding='utf-8')
+        self.result.chain = [Plain('别太累，吃点东西。')]
+        self.plugin.synthesize = AsyncMock()
+        with patch.object(module.random, 'random', return_value=0.5):
+            await self.plugin.speak_when_requested(self.event)
+        self.plugin.synthesize.assert_not_awaited()
+
 
 class SpontaneousChecks(IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.plugin = object.__new__(module.OwnerVoice)
-        self.plugin.config = {'enabled': True, 'owner_session': OWNER, 'spontaneous_probability': 1.0}
+        self.plugin.config = {
+            'enabled': True, 'owner_session': OWNER, 'spontaneous_probability': 1.0,
+            'care_voice': False,
+        }
         self.plugin.root = Path(self.temp.name) / 'audio'
         self.plugin.root.mkdir()
         self.plugin.state_path = Path(self.temp.name) / 'spontaneous.json'
@@ -243,6 +516,15 @@ class BreezeChecks(IsolatedAsyncioTestCase):
 
 
 class SpeechTextChecks(IsolatedAsyncioTestCase):
+    def test_false_claim_sentences_are_not_spoken(self):
+        first = '好啦好啦，语音版再听一遍。路上慢点走，别玩手机。明天等你哦。'
+        self.assertEqual(module.drop_false_claims(first), '路上慢点走，别玩手机。明天等你哦。')
+        second = '你这孩子，刚才那条不就是语音嘛，非得再来说一遍。行行行，路上慢点。晚安啦。'
+        self.assertEqual(module.drop_false_claims(second), '行行行，路上慢点。晚安啦。')
+        third = '爹，我都连发三条语音了，你到底在哪儿听的呀？是不是根本没点开这条？你好好听，路上慢点。晚安啦。'
+        self.assertEqual(module.drop_false_claims(third), '你好好听，路上慢点。晚安啦。')
+        self.assertEqual(module.drop_false_claims('路上慢点走，到了跟我说一声。晚安。'), '路上慢点走，到了跟我说一声。晚安。')
+
     def test_cleanup_and_chunks(self):
         t = '我是小助手，人可不憨啊。\n\n平时就爱跟你拌嘴（斜眼）\n明天见。（笑）[[meme:开心]]'
         s = module.speech_text(t)

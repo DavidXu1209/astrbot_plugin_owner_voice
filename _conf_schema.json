@@ -29,6 +29,30 @@
     "default": 0.5,
     "hint": "0 到 1 之间的小数；1 表示只要满足条件就一定触发。"
   },
+  "voice_hold_minutes": {
+    "description": "要过语音后连续念几分钟",
+    "type": "float",
+    "default": 5,
+    "hint": "主人明确要语音之后，这段时间内他的每条私聊回复都会念成语音。再说「别用语音」会提前结束。0 表示不要这段连续语音。"
+  },
+  "care_voice": {
+    "description": "主动关心时小概率用语音",
+    "type": "bool",
+    "default": true,
+    "hint": "主人提到出门、到家、累了、吃饭这类情况，或回复本身是很短的叮嘱时，有一定概率念成语音。回答具体问题不会因为这个开关被念出来。"
+  },
+  "care_voice_probability": {
+    "description": "平时主动关心的语音概率",
+    "type": "float",
+    "default": 0.08,
+    "hint": "0 到 1。默认大约每十几次关心里念一次。两次这种自动语音至少隔 20 分钟。"
+  },
+  "care_voice_night_probability": {
+    "description": "晚上 10 点后主动关心的语音概率",
+    "type": "float",
+    "default": 0.12,
+    "hint": "北京时间 22:00 到次日 06:00 用这个概率，只比平时高一点。晚安语音仍走自己的概率和每周上限。"
+  },
   "breeze_api_key": {
     "description": "BreezeBlue API key（留空则用微软免费声音）",
     "type": "string",
