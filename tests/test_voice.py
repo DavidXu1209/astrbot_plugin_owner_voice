@@ -84,6 +84,32 @@ class VoiceChecks(IsolatedAsyncioTestCase):
         self.assertEqual(seen, ['路上慢点，晚安。'])
         self.assertEqual(self.result.chain[0].text, '路上慢点，晚安。')
 
+    async def test_voice_keeps_sticker_and_meme_tag(self):
+        class Pic:
+            pass
+
+        pic = Pic()
+        self.extra[module.MARKER] = True
+        self.result.chain = [Plain('给你补一张。[[meme:委屈]]'), pic]
+        audio = self.plugin.root / 'spoken.wav'
+        seen = []
+
+        async def synth(text, tone=''):
+            seen.append(text)
+            return audio
+
+        self.plugin.synthesize = synth
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual(seen, ['给你补一张。'])
+        self.assertIsInstance(self.result.chain[0], Record)
+        self.assertEqual(self.result.chain[0].text, '给你补一张。')
+        self.assertIs(self.result.chain[1], pic)
+        self.assertEqual(len(self.result.chain), 2)
+
+        self.result.chain = [Plain('好。[[meme:开心]][[meme:抱抱]]')]
+        await self.plugin.speak_when_requested(self.event)
+        self.assertEqual([p.text for p in self.result.chain[1:]], ['[[meme:开心]]', '[[meme:抱抱]]'])
+
     async def test_success_produces_native_record(self):
         self.extra[module.MARKER] = True
         audio = self.plugin.root / ('a'*32+'.mp3')

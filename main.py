@@ -69,7 +69,8 @@ HINT_UNKNOWN = '\n系统事实，不要复述：你无法判断以前哪条是�
 VOICE_PROMPT = (
     '\n用户这次想听你的语音，这条回复会由程序念成语音发给他，你直接说要说的话就行，不要说发不了语音或先欠着。'
     '只写标准普通话口语，不用方言、地域口音词或方言句尾；用自然温软的简短中文正文，尽量不超过180字。'
-    '程序负责语音合成，不要解释合成过程，不加动作描写、颜文字或表情配图标记。'
+    '程序负责语音合成，不要解释合成过程，不加动作描写或颜文字。'
+    '表情包照常发：要发就写 [[meme:名字]]，不要只说「给你补一张」。这个标记不会被念出来，会跟语音一起留下。'
     '最前面单独写一个语气标记，用几个字说这段话该怎么说，比如【语气：惊喜开心】【语气：委屈带哭腔】【语气：小声撒娇】【语气：嘴硬又有点害羞】，按你此刻真实的情绪来选；程序会读掉它，不会念出来。'
     '哭腔、撒娇这些交给语气标记，正文只写正常说的话，不写“呜呜”“嘤嘤”这类拟声字，也别用一串省略号硬造停顿。'
     '不要写「语音版」「刚才那条就是语音」「我已经发过了」「连发了几条」「你有没有点开」。'
@@ -79,6 +80,7 @@ CARE_PROMPT = (
     '\n这条回复有较小概率被念成语音，而且只有你主要在关心他、叮嘱他的时候才会念。'
     '若是在关心他：写成一两句标准普通话口语，不超过80字，不用方言，不加动作描写或颜文字，'
     '最前面单独写一个语气标记，比如【语气：温柔小声】，程序会读掉，不要提语音。'
+    '表情包照常写 [[meme:名字]]，标记不会被念出来。'
     '若是在回答具体问题或聊别的事：照常写，不必缩短。'
 )
 
@@ -124,6 +126,18 @@ def care_moment(message: str) -> bool:
     return bool(CARE_MOMENT.search(message))
 
 
+def voice_chain(record, chain) -> list:
+    """Keep stickers beside the voice. Spoken words stay in the record; meme tags stay for the meme plugin."""
+    visuals = [part for part in chain if not isinstance(part, (Plain, Record))]
+    if visuals:
+        return [record, *visuals]
+    marks = []
+    for part in chain:
+        if isinstance(part, Plain):
+            marks.extend(MEME_TAG.findall(part.text or ''))
+    return [record, *(Plain(mark) for mark in marks)]
+
+
 def caring_reply(text: str) -> bool:
     text = (text or '').strip()
     return bool(text) and len(text) <= CARE_MAX and bool(CARE_REPLY.search(text))
@@ -161,6 +175,7 @@ def split_tone(text: str):
     return TONE_TAG.sub('', text).strip(), tone
 
 
+MEME_TAG = re.compile(r'\[\[meme:[^\]]+\]\]')
 LAUGH = re.compile(r'[（(][^（）()]{0,6}笑[^（）()]{0,6}[）)]')
 STAGE = re.compile(r'[（(][^（）()]{1,12}[）)]')
 SENT = re.compile(r'[^。！？!?…~]*[。！？!?…~]+[”’」』]*|[^。！？!?…~]+$')
@@ -455,7 +470,7 @@ class OwnerVoice(Star):
             if self.wants_spontaneous(message):
                 event.set_extra(MARKER, True)
                 event.set_extra(SPONTANEOUS, True)
-                req.system_prompt = base + '\n他要去睡了。这次回复会由程序念成一条晚安语音发给他：只写一两句标准普通话口语的晚安话，温柔一点、带点你的小性子，不超过60字，不用方言，不加动作描写、颜文字或表情配图标记，也不要提语音。最前面单独写一个语气标记，比如【语气：困困的，温柔小声】，程序会读掉它，不会念出来。' + hint
+                req.system_prompt = base + '\n他要去睡了。这次回复会由程序念成一条晚安语音发给他：只写一两句标准普通话口语的晚安话，温柔一点、带点你的小性子，不超过60字，不用方言，不加动作描写或颜文字，也不要提语音。表情包照常写 [[meme:名字]]，这个标记不会被念出来。最前面单独写一个语气标记，比如【语气：困困的，温柔小声】，程序会读掉它，不会念出来。' + hint
                 return
             if self.wants_care_voice(message):
                 event.set_extra(CARE, True)
@@ -602,7 +617,7 @@ class OwnerVoice(Star):
             logger.warning('按需语音暂不可用，保留本次文字回复。')
             self._note_delivery('text')
             return
-        result.chain = [Record.fromFileSystem(str(path), text=text)]
+        result.chain = voice_chain(Record.fromFileSystem(str(path), text=text), result.chain)
         if event.get_extra(SPONTANEOUS) is True:
             try:
                 self._record_spontaneous()

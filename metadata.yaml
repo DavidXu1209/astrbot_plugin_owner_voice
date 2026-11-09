@@ -5,7 +5,7 @@ desc: |
   配置了 BreezeBlue 音色就用它，没配则用免 Key 的微软 edge-tts 声音。
   明确要过语音后的几分钟都会念；平时主动关心有小概率用语音，晚上 10 点后略高一点。
   深夜主人道晚安时，还会按概率主动回一条晚安语音（每 7 天有上限）。
-version: 0.2.10
+version: 0.2.11
 author: David Xu
 repo: https://github.com/DavidXu1209/astrbot_plugin_owner_voice
 astrbot_version: ">=4.16.0"
